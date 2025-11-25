@@ -27,24 +27,21 @@ public class CommissionProcessor
         _client = new HttpClient();
     }
 
-    public async Task ProcessIssueAsync()
-    {
-        var data = LoadQuery("IssueQuery.sql");
-        var groups = data.AsEnumerable().GroupBy(r => r.GetString("ORDERNUMBER"));
+    public Task ProcessIssueAsync() => ProcessAsync(CommissionType.Issue, "IssueQuery.sql");
 
-        int created = 0, skipped = 0, failed = 0, released = 0;
+    public Task ProcessReceiptAsync() => ProcessAsync(CommissionType.Receipt, "ReceiptQuery.sql");
+
+    private async Task ProcessAsync(CommissionType type, string queryFile)
+    {
+        var data = LoadQuery(queryFile);
+        var groups = data.AsEnumerable().GroupBy(r => r.GetString("ORDERNUMBER"));
+        var typeName = type == CommissionType.Issue ? "issueCommission" : "receiptCommission";
+
+        int created = 0, failed = 0, released = 0;
 
         foreach (var group in groups)
         {
             var orderNumber = group.Key;
-
-            // Skip orders that already exist in HanelSoft to avoid duplicates
-            if (await GetAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionExists}/issueCommission/{orderNumber}"))
-            {
-                Logger.Info($"Order {orderNumber} - Already exists, skipping");
-                skipped++;
-                continue;
-            }
 
             // Items must exist in HanelSoft before we can reference them in a commission
             foreach (var row in group)
@@ -59,79 +56,39 @@ public class CommissionProcessor
                 }
             }
 
-            var positions = group.Select(r => CommissionBuilder.BuildIssuePosition(r, r.GetString("ITEMNUMBER")));
-            var json = CommissionBuilder.BuildIssueCommission(orderNumber, string.Join(",", positions));
+            var positions = group.Select(r => CommissionBuilder.BuildPosition(r, r.GetString("ITEMNUMBER"), type));
+            var json = CommissionBuilder.BuildCommission(orderNumber, string.Join(",", positions), type);
 
             // Commissions are created in DESIGNED state, then released to activate them
-            if (await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionSave}", json, $"Order {orderNumber} - Creation Failed"))
+            var (createSuccess, createBody) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionSave}", json, $"Order {orderNumber} - Creation Failed");
+            if (createSuccess)
             {
                 created++;
-                if (await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionRelease}/issueCommission/{orderNumber}", "", $"Release {orderNumber} failed"))
+                var (releaseSuccess, _) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionRelease}/{typeName}/{orderNumber}", "", $"Release {orderNumber} failed");
+                if (releaseSuccess)
                 {
                     released++;
                     Logger.Ok($"Order {orderNumber} - Created and Released");
+
+                    RecordProcessedOrders(group, type);
+                    Logger.Ok($"Order {orderNumber} - {group.Count()} lines recorded in VLMORDERS");
                 }
                 else
                     Logger.Warn($"Order {orderNumber} - Created but Release Failed");
             }
             else
+            {
                 failed++;
-        }
-
-        Logger.Info($"Completed: {created} created, {skipped} skipped, {failed} failed, {released} released");
-    }
-
-    // Receipt processing follows same workflow as Issue: check existence -> create items -> save -> release
-    public async Task ProcessReceiptAsync()
-    {
-        var data = LoadQuery("ReceiptQuery.sql");
-        var groups = data.AsEnumerable().GroupBy(r => r.GetString("ORDERNUMBER"));
-
-        int created = 0, skipped = 0, failed = 0, released = 0;
-
-        foreach (var group in groups)
-        {
-            var orderNumber = group.Key;
-
-            if (await GetAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionExists}/receiptCommission/{orderNumber}"))
-            {
-                Logger.Info($"Order {orderNumber} - Already exists, skipping");
-                skipped++;
-                continue;
-            }
-
-            foreach (var row in group)
-            {
-                var item = row.GetString("ITEMNUMBER");
-                // Receipt items don't have manufacturer/productLine in our data source
-                if (!string.IsNullOrEmpty(item) && !await GetItemAsync(item))
+                // If order already exists in HanelSoft, record in VLMORDERS to prevent retries
+                if (createBody.Contains("already assigned"))
                 {
-                    if (await PutItemAsync(item, null, null))
-                        Logger.Ok($"Created item: {item}");
-                    else
-                        Logger.Warn($"Failed to create item: {item}");
+                    RecordProcessedOrders(group, type);
+                    Logger.Info($"Order {orderNumber} - Marked as processed (already exists in HanelSoft)");
                 }
             }
-
-            var positions = group.Select(r => CommissionBuilder.BuildReceiptPosition(r, r.GetString("ITEMNUMBER")));
-            var json = CommissionBuilder.BuildReceiptCommission(orderNumber, string.Join(",", positions));
-
-            if (await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionSave}", json, $"Order {orderNumber} - Creation Failed"))
-            {
-                created++;
-                if (await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionRelease}/receiptCommission/{orderNumber}", "", $"Release {orderNumber} failed"))
-                {
-                    released++;
-                    Logger.Ok($"Order {orderNumber} - Created and Released");
-                }
-                else
-                    Logger.Warn($"Order {orderNumber} - Created but Release Failed");
-            }
-            else
-                failed++;
         }
 
-        Logger.Info($"Completed: {created} created, {skipped} skipped, {failed} failed, {released} released");
+        Logger.Info($"Completed: {created} created, {failed} failed, {released} released");
     }
 
     private DataTable LoadQuery(string queryFile)
@@ -141,43 +98,82 @@ public class CommissionProcessor
 
         // DancikObjects connects to our IBM database and runs the query
         var dancik = new DancikObjects(query, new Dictionary<string, string>());
-        Logger.Info(string.Join(',', dancik.Messages));
         Logger.Info($"Total rows retrieved: {dancik.ReturnData.Rows.Count}");
         return dancik.ReturnData;
     }
 
-    private async Task<bool> PutAsync(string url, string json, string context)
+    private void InsertVLMOrder(string voType, string orderNumber, string referenceNumber, string lineNumber, string itemNumber)
+    {
+        var queryPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Queries", "VLMOrderInsert.sql");
+        var query = File.ReadAllText(queryPath);
+
+        var parameters = new Dictionary<string, string>
+        {
+            { "VOTYPE", voType },
+            { "VOORDER", orderNumber },
+            { "VOREF", referenceNumber },
+            { "VOLINE", lineNumber },
+            { "VOITEM", itemNumber }
+        };
+
+        var dancik = new DancikObjects(query, parameters);
+    }
+
+    private void RecordProcessedOrders(IEnumerable<DataRow> rows, CommissionType type)
+    {
+        var voType = type == CommissionType.Issue ? "I" : "R";
+        foreach (var row in rows)
+        {
+            InsertVLMOrder(
+                voType,
+                row.GetString("ORDERNUMBER"),
+                row.GetString("REFERENCENUMBER"),
+                row.GetString("LINENUMBER"),
+                row.GetString("ITEMNUMBER")
+            );
+        }
+    }
+
+    private async Task<(bool Success, string Body)> PutAsync(string url, string json, string context)
     {
         try
         {
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             var response = await _client.PutAsync(url, content);
+            var body = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
             {
-                Logger.Fail($"{context}: {response.StatusCode}");
-                return false;
+                Logger.Fail($"{context}: {response.StatusCode} - {body}");
+                return (false, body);
             }
-            return true;
+            return (true, body);
         }
         catch (Exception ex)
         {
             Logger.Error(context, ex);
-            return false;
+            return (false, "");
         }
     }
 
     private async Task<bool> GetAsync(string url)
     {
         try { return (await _client.GetAsync(url)).IsSuccessStatusCode; }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            Logger.Warn($"GET request failed for {url}: {ex.Message}");
+            return false;
+        }
     }
 
     private Task<bool> GetItemAsync(string item) =>
         GetAsync($"{_config.ApiBaseUrl}{_config.Endpoints.ItemDefinitionFind}/{item}");
 
-    private Task<bool> PutItemAsync(string item, string? manufacturer, string? productLine) =>
-        PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.ItemDefinitionSave}",
+    private async Task<bool> PutItemAsync(string item, string? manufacturer, string? productLine)
+    {
+        var (success, _) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.ItemDefinitionSave}",
             ItemDefinitionBuilder.Build(item, manufacturer, productLine), $"Create item {item} failed");
+        return success;
+    }
 
     public void Dispose() => _client.Dispose();
 }

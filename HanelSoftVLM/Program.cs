@@ -5,6 +5,7 @@ using HanelSoftVLM.Logging;
 using HanelSoftVLM.Services;
 
 var config = AppConfig.Load();
+Logger.Initialize(config.LogRetentionDays);
 var processor = new CommissionProcessor(config);
 
 Logger.Info($"HanelSoftVLM service started - processing every {config.ProcessingIntervalSeconds} seconds");

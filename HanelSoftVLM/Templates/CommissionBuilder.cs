@@ -2,10 +2,12 @@ using System.Data;
 
 namespace HanelSoftVLM.Templates;
 
+public enum CommissionType { Issue, Receipt }
+
 // Builds JSON payloads for the HanelSoft warehouse API
 public static class CommissionBuilder
 {
-    public static string BuildIssuePosition(DataRow row, string itemNumber)
+    public static string BuildPosition(DataRow row, string itemNumber, CommissionType type)
     {
         var lineNumber = row["LINENUMBER"]?.ToString() ?? "0";
         var quantity = decimal.TryParse(row["QUANTITY"]?.ToString(), out var q) ? q : 1m;
@@ -14,96 +16,94 @@ public static class CommissionBuilder
 
         var quantAttr = string.IsNullOrEmpty(serialNumber) ? "" :
             $$"""{ "attribute" : "Serial_Number", "value" : "{{serialNumber}}" }""";
-        var posAttr = string.IsNullOrEmpty(location) ? "" :
-            $$"""{ "attribute" : "BinLocation", "value" : "{{location}}" }""";
 
-        return $$"""
+        // Issue = outbound (picking from warehouse), Receipt = inbound (receiving stock)
+        if (type == CommissionType.Issue)
         {
-          "@type" : "issuePosition",
-          "number" : "{{lineNumber}}",
-          "stateType" : "DESIGNED",
-          "requiredQuantity" : {{quantity}},
-          "itemDefinition" : "{{itemNumber}}",
-          "positionAttributes" : [ {{posAttr}} ],
-          "quantAttributes" : [ {{quantAttr}} ]
+            var posAttr = string.IsNullOrEmpty(location) ? "" :
+                $$"""{ "attribute" : "BinLocation", "value" : "{{location}}" }""";
+
+            return $$"""
+            {
+              "@type" : "issuePosition",
+              "number" : "{{lineNumber}}",
+              "stateType" : "DESIGNED",
+              "requiredQuantity" : {{quantity}},
+              "itemDefinition" : "{{itemNumber}}",
+              "positionAttributes" : [ {{posAttr}} ],
+              "quantAttributes" : [ {{quantAttr}} ]
+            }
+            """;
         }
-        """;
+        else
+        {
+            // Receipt API requires additional date/state fields that Issue doesn't need
+            var ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff+00:00");
+            var posAttr = string.IsNullOrEmpty(location) ? "" :
+                $$"""{ "attribute" : "LDCLocation", "value" : "{{location}}" }""";
+
+            return $$"""
+            {
+              "@type" : "receiptPosition",
+              "number" : "{{lineNumber}}",
+              "stateType" : "DESIGNED",
+              "creationDate" : "{{ts}}",
+              "changeDate" : "{{ts}}",
+              "releaseDate" : null,
+              "releaseUser" : null,
+              "readyDate" : null,
+              "requiredQuantity" : {{quantity}},
+              "realisedQuantity" : 0,
+              "width" : null,
+              "depth" : null,
+              "height" : null,
+              "loadUnitType" : null,
+              "itemDefinition" : "{{itemNumber}}",
+              "positionAttributes" : [ {{posAttr}} ],
+              "bookingAttributes" : [ ],
+              "disabledBookingAttributes" : [ ],
+              "quantAttributes" : [ {{quantAttr}} ]
+            }
+            """;
+        }
     }
 
-    public static string BuildReceiptPosition(DataRow row, string itemNumber)
+    public static string BuildCommission(string orderNumber, string positionsArray, CommissionType type)
     {
-        // Receipt uses different column names than issue
-        var lineNumber = row["INVLINE"]?.ToString() ?? "0";
-        var quantity = decimal.TryParse(row["QUANTITY"]?.ToString(), out var q) ? q : 1m;
-        var serialNumber = row["SERIALNUMBER"]?.ToString()?.Trim() ?? "";
-        var location = row["LDCLOCATION"]?.ToString()?.Trim() ?? "";
-        var ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff+00:00");
-
-        var quantAttr = string.IsNullOrEmpty(serialNumber) ? "" :
-            $$"""{ "attribute" : "Serial_Number", "value" : "{{serialNumber}}" }""";
-        var posAttr = string.IsNullOrEmpty(location) ? "" :
-            $$"""{ "attribute" : "LDCLocation", "value" : "{{location}}" }""";
-
-        // Receipt positions have more fields than issue positions
-        return $$"""
+        if (type == CommissionType.Issue)
         {
-          "@type" : "receiptPosition",
-          "number" : "{{lineNumber}}",
-          "stateType" : "DESIGNED",
-          "creationDate" : "{{ts}}",
-          "changeDate" : "{{ts}}",
-          "releaseDate" : null,
-          "releaseUser" : null,
-          "readyDate" : null,
-          "requiredQuantity" : {{quantity}},
-          "realisedQuantity" : 0,
-          "width" : null,
-          "depth" : null,
-          "height" : null,
-          "loadUnitType" : null,
-          "itemDefinition" : "{{itemNumber}}",
-          "positionAttributes" : [ {{posAttr}} ],
-          "bookingAttributes" : [ ],
-          "disabledBookingAttributes" : [ ],
-          "quantAttributes" : [ {{quantAttr}} ]
+            return $$"""
+            {
+              "@type" : "issueCommission",
+              "identifier" : "{{orderNumber}}",
+              "stateType" : "DESIGNED",
+              "executionType" : "SHORTEST_PATH_OPTIMISATION",
+              "positions" : [ {{positionsArray}} ],
+              "bookingAttributes" : [ ]
+            }
+            """;
         }
-        """;
-    }
-
-    public static string BuildIssueCommission(string orderNumber, string positionsArray)
-    {
-        return $$"""
+        else
         {
-          "@type" : "issueCommission",
-          "identifier" : "{{orderNumber}}",
-          "stateType" : "DESIGNED",
-          "executionType" : "SHORTEST_PATH_OPTIMISATION",
-          "positions" : [ {{positionsArray}} ],
-          "bookingAttributes" : [ ]
+            var ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff+00:00");
+            return $$"""
+            {
+              "@type" : "receiptCommission",
+              "identifier" : "{{orderNumber}}",
+              "description" : "",
+              "stateType" : "DESIGNED",
+              "executionType" : "SHORTEST_PATH_OPTIMISATION",
+              "creationDate" : "{{ts}}",
+              "changeDate" : "{{ts}}",
+              "plannedReleaseDate" : null,
+              "releaseDate" : null,
+              "readyDate" : null,
+              "releaseUser" : null,
+              "positions" : [ {{positionsArray}} ],
+              "commissionAttributes" : [ ],
+              "bookingAttributes" : [ ]
+            }
+            """;
         }
-        """;
-    }
-
-    public static string BuildReceiptCommission(string orderNumber, string positionsArray)
-    {
-        var ts = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff+00:00");
-        return $$"""
-        {
-          "@type" : "receiptCommission",
-          "identifier" : "{{orderNumber}}",
-          "description" : "",
-          "stateType" : "DESIGNED",
-          "executionType" : "SHORTEST_PATH_OPTIMISATION",
-          "creationDate" : "{{ts}}",
-          "changeDate" : "{{ts}}",
-          "plannedReleaseDate" : null,
-          "releaseDate" : null,
-          "readyDate" : null,
-          "releaseUser" : null,
-          "positions" : [ {{positionsArray}} ],
-          "commissionAttributes" : [ ],
-          "bookingAttributes" : [ ]
-        }
-        """;
     }
 }

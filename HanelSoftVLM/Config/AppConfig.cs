@@ -6,6 +6,7 @@ namespace HanelSoftVLM.Config;
 public class AppConfig
 {
     public int ProcessingIntervalSeconds { get; set; } = 60;
+    public int LogRetentionDays { get; set; } = 14;
     public string ApiBaseUrl { get; set; } = "";
     public EndpointsConfig Endpoints { get; set; } = new();
 
