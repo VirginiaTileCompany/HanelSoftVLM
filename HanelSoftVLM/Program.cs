@@ -8,43 +8,69 @@ var config = AppConfig.Load();
 Logger.Initialize(config.LogRetentionDays);
 var processor = new CommissionProcessor(config);
 
-Logger.Info($"HanelSoftVLM service started - processing every {config.ProcessingIntervalSeconds} seconds");
+Logger.Info($"HanelSoftVLM service started");
+Logger.Info($"  Receipt (Putaway) interval: {config.ReceiptIntervalSeconds} seconds");
+Logger.Info($"  Issue (Pick) interval: {config.IssueIntervalSeconds} seconds");
 Logger.Info("Press Ctrl+C to stop");
 
 var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
     e.Cancel = true;  // Prevent immediate termination
-    cts.Cancel();     // Signal our loop to stop
+    cts.Cancel();     // Signal our loops to stop
     Logger.Info("Shutdown requested...");
 };
 
-while (!cts.Token.IsCancellationRequested)
-{
-    try
-    {
-        Logger.Info("--- Processing Issue commissions ---");
-        await processor.ProcessIssueAsync();
+// Run both tasks concurrently with their own intervals
+var receiptTask = RunPeriodicAsync(
+    "Receipt",
+    () => processor.ProcessReceiptAsync(),
+    config.ReceiptIntervalSeconds,
+    cts.Token);
 
-        Logger.Info("--- Processing Receipt commissions ---");
-        await processor.ProcessReceiptAsync();
-    }
-    catch (Exception ex)
-    {
-        // Log but don't crash - we'll retry next cycle
-        Logger.Error("Processing cycle failed", ex);
-    }
+var issueTask = RunPeriodicAsync(
+    "Issue",
+    () => processor.ProcessIssueAsync(),
+    config.IssueIntervalSeconds,
+    cts.Token);
 
-    try
-    {
-        await Task.Delay(config.ProcessingIntervalSeconds * 1000, cts.Token);
-    }
-    catch (TaskCanceledException)
-    {
-        // Ctrl+C was pressed during delay
-        break;
-    }
-}
+await Task.WhenAll(receiptTask, issueTask);
 
 processor.Dispose();
 Logger.Info("Service stopped");
+
+// Runs the action periodically, skipping if the previous run is still in progress
+static async Task RunPeriodicAsync(string name, Func<Task> action, int intervalSeconds, CancellationToken ct)
+{
+    var isRunning = false;
+
+    while (!ct.IsCancellationRequested)
+    {
+        if (!isRunning)
+        {
+            isRunning = true;
+            try
+            {
+                Logger.Info($"--- Processing {name} commissions ---");
+                await action();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"{name} processing failed", ex);
+            }
+            finally
+            {
+                isRunning = false;
+            }
+        }
+
+        try
+        {
+            await Task.Delay(intervalSeconds * 1000, ct);
+        }
+        catch (TaskCanceledException)
+        {
+            break;
+        }
+    }
+}
