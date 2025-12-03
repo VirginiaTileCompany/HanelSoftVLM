@@ -1,9 +1,5 @@
 # Visual Studio
 .vs/
 
-# Build output
-bin/
-obj/
-
 # Logs
 *.log
