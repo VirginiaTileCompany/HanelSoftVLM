@@ -43,16 +43,16 @@ public class CommissionProcessor
         {
             var orderNumber = group.Key;
 
-            // Items must exist in HanelSoft before we can reference them in a commission
+            // Create or update items in HanelSoft before referencing them in a commission
             foreach (var row in group)
             {
                 var item = row.GetString("ITEMNUMBER");
-                if (!string.IsNullOrEmpty(item) && !await GetItemAsync(item))
+                if (!string.IsNullOrEmpty(item))
                 {
                     if (await PutItemAsync(item, row.GetString("MANUFACTURER"), row.GetString("PRODUCTLINE")))
-                        Logger.Ok($"Created item: {item}");
+                        Logger.Ok($"Synced item: {item}");
                     else
-                        Logger.Warn($"Failed to create item: {item}");
+                        Logger.Warn($"Failed to sync item: {item}");
                 }
             }
 
@@ -155,24 +155,29 @@ public class CommissionProcessor
         }
     }
 
-    private async Task<bool> GetAsync(string url)
-    {
-        try { return (await _client.GetAsync(url)).IsSuccessStatusCode; }
-        catch (Exception ex)
-        {
-            Logger.Warn($"GET request failed for {url}: {ex.Message}");
-            return false;
-        }
-    }
-
-    private Task<bool> GetItemAsync(string item) =>
-        GetAsync($"{_config.ApiBaseUrl}{_config.Endpoints.ItemDefinitionFind}/{item}");
-
     private async Task<bool> PutItemAsync(string item, string? manufacturer, string? productLine)
     {
+        var additionalItems = GetAdditionalItemNumbers(item);
         var (success, _) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.ItemDefinitionSave}",
-            ItemDefinitionBuilder.Build(item, manufacturer, productLine), $"Create item {item} failed");
+            ItemDefinitionBuilder.Build(item, manufacturer, productLine, additionalItems), $"Sync item {item} failed");
         return success;
+    }
+
+    private List<string> GetAdditionalItemNumbers(string parentItem)
+    {
+        var queryPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Queries", "AdditionalItemsQuery.sql");
+        var query = File.ReadAllText(queryPath);
+
+        var parameters = new Dictionary<string, string>
+        {
+            { "PARENTITEM", parentItem }
+        };
+
+        var dancik = new DancikObjects(query, parameters);
+        return dancik.ReturnData.AsEnumerable()
+            .Select(r => r.GetString("CHILDITEM"))
+            .Where(s => !string.IsNullOrEmpty(s))
+            .ToList();
     }
 
     public void Dispose() => _client.Dispose();

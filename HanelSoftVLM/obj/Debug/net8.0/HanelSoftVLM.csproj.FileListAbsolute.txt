@@ -37,3 +37,4 @@ C:\Users\OrlandoArnosa\source\repos\HanelSoftVLM\HanelSoftVLM\bin\Debug\net8.0\Q
 C:\Users\OrlandoArnosa\source\repos\HanelSoftVLM\HanelSoftVLM\bin\Debug\net8.0\appsettings.json
 C:\Users\OrlandoArnosa\source\repos\HanelSoftVLM\HanelSoftVLM\bin\Debug\net8.0\Queries\VLMOrderInsert.sql
 C:\Users\OrlandoArnosa\source\repos\HanelSoftVLM\HanelSoftVLM\obj\Debug\net8.0\HanelSoftVLM.sourcelink.json
+C:\Users\OrlandoArnosa\source\repos\HanelSoftVLM\HanelSoftVLM\bin\Debug\net8.0\Queries\AdditionalItemsQuery.sql

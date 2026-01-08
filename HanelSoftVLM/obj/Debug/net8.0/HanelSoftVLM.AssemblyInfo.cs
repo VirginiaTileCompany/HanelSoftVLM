@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("HanelSoftVLM")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+aba9502e96a377c6864d18dec4500d1303ca6c77")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3a6a7130a0e4b41bebcc0151b3b95064ee51c249")]
 [assembly: System.Reflection.AssemblyProductAttribute("HanelSoftVLM")]
 [assembly: System.Reflection.AssemblyTitleAttribute("HanelSoftVLM")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
