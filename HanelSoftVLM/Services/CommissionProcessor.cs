@@ -7,6 +7,16 @@ using HanelSoftVLM.Templates;
 
 namespace HanelSoftVLM.Services;
 
+// Result of processing a batch of commissions
+public record ProcessingResult(
+    int RowsFound,
+    int Created,
+    int Failed,
+    int Released,
+    int ItemsSynced,
+    int Skipped  // Orders skipped due to abandonment
+);
+
 // Helper to safely extract string values from DataRow without null issues
 internal static class DataRowExtensions
 {
@@ -27,21 +37,28 @@ public class CommissionProcessor
         _client = new HttpClient();
     }
 
-    public Task ProcessIssueAsync() => ProcessAsync(CommissionType.Issue, "IssueQuery.sql");
+    public Task<ProcessingResult> ProcessIssueAsync() => ProcessAsync(CommissionType.Issue, "IssueQuery.sql");
 
-    public Task ProcessReceiptAsync() => ProcessAsync(CommissionType.Receipt, "ReceiptQuery.sql");
+    public Task<ProcessingResult> ProcessReceiptAsync() => ProcessAsync(CommissionType.Receipt, "ReceiptQuery.sql");
 
-    private async Task ProcessAsync(CommissionType type, string queryFile)
+    private async Task<ProcessingResult> ProcessAsync(CommissionType type, string queryFile)
     {
         var data = LoadQuery(queryFile);
         var groups = data.AsEnumerable().GroupBy(r => r.GetString("ORDERNUMBER"));
         var typeName = type == CommissionType.Issue ? "issueCommission" : "receiptCommission";
 
-        int created = 0, failed = 0, released = 0;
+        int created = 0, failed = 0, released = 0, itemsSynced = 0, skipped = 0;
 
         foreach (var group in groups)
         {
             var orderNumber = group.Key;
+
+            // Skip orders that have been abandoned due to persistent failures
+            if (FailureTracker.IsAbandoned(orderNumber))
+            {
+                skipped++;
+                continue;
+            }
 
             // Create or update items in HanelSoft before referencing them in a commission
             foreach (var row in group)
@@ -49,10 +66,20 @@ public class CommissionProcessor
                 var item = row.GetString("ITEMNUMBER");
                 if (!string.IsNullOrEmpty(item))
                 {
+                    var isNewSync = ItemSyncCache.TryMarkSynced(item);
                     if (await PutItemAsync(item, row.GetString("MANUFACTURER"), row.GetString("PRODUCTLINE")))
-                        Logger.Ok($"Synced item: {item}");
+                    {
+                        if (isNewSync)
+                        {
+                            itemsSynced++;
+                            Logger.Ok($"Synced item: {item}");
+                        }
+                    }
                     else
-                        Logger.Warn($"Failed to sync item: {item}");
+                    {
+                        // Only log item sync failures once per item
+                        Logger.FailOnce($"item-{item}", $"Failed to sync item: {item}");
+                    }
                 }
             }
 
@@ -60,18 +87,19 @@ public class CommissionProcessor
             var json = CommissionBuilder.BuildCommission(orderNumber, string.Join(",", positions), type);
 
             // Commissions are created in DESIGNED state, then released to activate them
-            var (createSuccess, createBody) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionSave}", json, $"Order {orderNumber} - Creation Failed");
+            var (createSuccess, createBody) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionSave}", json, orderNumber);
             if (createSuccess)
             {
                 created++;
-                var (releaseSuccess, _) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionRelease}/{typeName}/{orderNumber}", "", $"Release {orderNumber} failed");
+                FailureTracker.ClearFailure(orderNumber);  // Clear any previous failures
+                var (releaseSuccess, _) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionRelease}/{typeName}/{orderNumber}", "", orderNumber);
                 if (releaseSuccess)
                 {
                     released++;
                     Logger.Ok($"Order {orderNumber} - Created and Released");
 
                     RecordProcessedOrders(group, type);
-                    Logger.Ok($"Order {orderNumber} - {group.Count()} lines recorded in VLMORDERS");
+                    Logger.Debug($"Order {orderNumber} - {group.Count()} lines recorded in VLMORDERS");
                 }
                 else
                     Logger.Warn($"Order {orderNumber} - Created but Release Failed");
@@ -84,11 +112,22 @@ public class CommissionProcessor
                 {
                     RecordProcessedOrders(group, type);
                     Logger.Info($"Order {orderNumber} - Marked as processed (already exists in HanelSoft)");
+                    FailureTracker.ClearFailure(orderNumber);
+                }
+                else
+                {
+                    // Track failure and check if we should abandon this order
+                    var (_, isAbandoned) = FailureTracker.RecordFailure(orderNumber, createBody);
+                    if (isAbandoned)
+                    {
+                        // Record abandoned order in VLMORDERS with failure flag to prevent future retries
+                        RecordAbandonedOrder(group, type);
+                    }
                 }
             }
         }
 
-        Logger.Info($"Completed: {created} created, {failed} failed, {released} released");
+        return new ProcessingResult(data.Rows.Count, created, failed, released, itemsSynced, skipped);
     }
 
     private DataTable LoadQuery(string queryFile)
@@ -98,7 +137,7 @@ public class CommissionProcessor
 
         // DancikObjects connects to our IBM database and runs the query
         var dancik = new DancikObjects(query, new Dictionary<string, string>());
-        Logger.Info($"Total rows retrieved: {dancik.ReturnData.Rows.Count}");
+        Logger.Debug($"Total rows retrieved: {dancik.ReturnData.Rows.Count}");
         return dancik.ReturnData;
     }
 
@@ -134,7 +173,22 @@ public class CommissionProcessor
         }
     }
 
-    private async Task<(bool Success, string Body)> PutAsync(string url, string json, string context)
+    private void RecordAbandonedOrder(IEnumerable<DataRow> rows, CommissionType type)
+    {
+        // Use "F" (Failed) type to mark abandoned orders so they won't be retried
+        foreach (var row in rows)
+        {
+            InsertVLMOrder(
+                "F",
+                row.GetString("ORDERNUMBER"),
+                row.GetString("REFERENCENUMBER"),
+                row.GetString("LINENUMBER"),
+                row.GetString("ITEMNUMBER")
+            );
+        }
+    }
+
+    private async Task<(bool Success, string Body)> PutAsync(string url, string json, string orderNumber)
     {
         try
         {
@@ -143,14 +197,19 @@ public class CommissionProcessor
             var body = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
             {
-                Logger.Fail($"{context}: {response.StatusCode} - {body}");
+                var errorMessage = $"{response.StatusCode} - {body}";
+                var (shouldLog, _) = FailureTracker.RecordFailure(orderNumber, errorMessage);
+                if (shouldLog)
+                    Logger.Fail($"Order {orderNumber}: {errorMessage}");
                 return (false, body);
             }
             return (true, body);
         }
         catch (Exception ex)
         {
-            Logger.Error(context, ex);
+            var (shouldLog, _) = FailureTracker.RecordFailure(orderNumber, ex.Message);
+            if (shouldLog)
+                Logger.Error($"Order {orderNumber}", ex);
             return (false, "");
         }
     }
@@ -158,9 +217,31 @@ public class CommissionProcessor
     private async Task<bool> PutItemAsync(string item, string? manufacturer, string? productLine)
     {
         var additionalItems = GetAdditionalItemNumbers(item);
-        var (success, _) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.ItemDefinitionSave}",
-            ItemDefinitionBuilder.Build(item, manufacturer, productLine, additionalItems), $"Sync item {item} failed");
+        var (success, _) = await PutItemRequestAsync($"{_config.ApiBaseUrl}{_config.Endpoints.ItemDefinitionSave}",
+            ItemDefinitionBuilder.Build(item, manufacturer, productLine, additionalItems), item);
         return success;
+    }
+
+    // Separate PUT method for item syncs that doesn't use order failure tracking
+    private async Task<(bool Success, string Body)> PutItemRequestAsync(string url, string json, string itemNumber)
+    {
+        try
+        {
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+            var response = await _client.PutAsync(url, content);
+            var body = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode)
+            {
+                Logger.Debug($"Item sync {itemNumber} failed: {response.StatusCode} - {body}");
+                return (false, body);
+            }
+            return (true, body);
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug($"Item sync {itemNumber} failed: {ex.Message}");
+            return (false, "");
+        }
     }
 
     private List<string> GetAdditionalItemNumbers(string parentItem)

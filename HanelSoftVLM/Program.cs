@@ -21,7 +21,7 @@ Console.CancelKeyPress += (_, e) =>
     Logger.Info("Shutdown requested...");
 };
 
-// Run both tasks concurrently with their own intervals
+// Run processing tasks and periodic summary concurrently
 var receiptTask = RunPeriodicAsync(
     "Receipt",
     () => processor.ProcessReceiptAsync(),
@@ -34,15 +34,20 @@ var issueTask = RunPeriodicAsync(
     config.IssueIntervalSeconds,
     cts.Token);
 
-await Task.WhenAll(receiptTask, issueTask);
+var summaryTask = RunSummaryAsync(cts.Token);
+
+await Task.WhenAll(receiptTask, issueTask, summaryTask);
 
 processor.Dispose();
+Logger.Info(Logger.Stats.GetSummary());
 Logger.Info("Service stopped");
 
-// Runs the action periodically, skipping if the previous run is still in progress
-static async Task RunPeriodicAsync(string name, Func<Task> action, int intervalSeconds, CancellationToken ct)
+// Runs the action periodically, logging only when there's actual work
+static async Task RunPeriodicAsync(string name, Func<Task<ProcessingResult>> action, int intervalSeconds, CancellationToken ct)
 {
     var isRunning = false;
+    var consecutiveIdleCycles = 0;
+    const int idleLogThreshold = 30;  // Only log idle status every 30 cycles
 
     while (!ct.IsCancellationRequested)
     {
@@ -51,8 +56,31 @@ static async Task RunPeriodicAsync(string name, Func<Task> action, int intervalS
             isRunning = true;
             try
             {
-                Logger.Info($"--- Processing {name} commissions ---");
-                await action();
+                var result = await action();
+
+                // Update cumulative stats
+                Logger.Stats.IncrementCreated(result.Created);
+                Logger.Stats.IncrementFailed(result.Failed);
+                Logger.Stats.IncrementReleased(result.Released);
+                Logger.Stats.IncrementItemsSynced(result.ItemsSynced);
+
+                if (result.RowsFound > 0)
+                {
+                    // Active cycle - reset idle counter and log summary
+                    consecutiveIdleCycles = 0;
+                    Logger.Stats.IncrementActiveCycles();
+                    Logger.Info($"[{name}] Processed: {result.Created} created, {result.Failed} failed, {result.Released} released");
+                }
+                else
+                {
+                    // Idle cycle - only log periodically
+                    consecutiveIdleCycles++;
+                    Logger.Stats.IncrementIdleCycles();
+                    if (consecutiveIdleCycles % idleLogThreshold == 0)
+                    {
+                        Logger.Info($"[{name}] Idle for {consecutiveIdleCycles} cycles, waiting for work...");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -67,6 +95,32 @@ static async Task RunPeriodicAsync(string name, Func<Task> action, int intervalS
         try
         {
             await Task.Delay(intervalSeconds * 1000, ct);
+        }
+        catch (TaskCanceledException)
+        {
+            break;
+        }
+    }
+}
+
+// Logs cumulative stats every 15 minutes
+static async Task RunSummaryAsync(CancellationToken ct)
+{
+    const int summaryIntervalMinutes = 15;
+
+    while (!ct.IsCancellationRequested)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromMinutes(summaryIntervalMinutes), ct);
+            Logger.Info(Logger.Stats.GetSummary());
+
+            // Report abandoned orders count if any
+            var abandonedCount = FailureTracker.GetAbandonedCount();
+            if (abandonedCount > 0)
+            {
+                Logger.Warn($"Abandoned orders requiring manual intervention: {abandonedCount}");
+            }
         }
         catch (TaskCanceledException)
         {
