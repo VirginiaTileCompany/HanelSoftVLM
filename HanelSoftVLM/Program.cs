@@ -5,7 +5,7 @@ using HanelSoftVLM.Logging;
 using HanelSoftVLM.Services;
 
 var config = AppConfig.Load();
-Logger.Initialize(config.LogRetentionDays);
+Logger.Initialize(config.LogRetentionDays, config.DebugEnabled);
 var processor = new CommissionProcessor(config);
 
 Logger.Info($"HanelSoftVLM service started");
@@ -69,7 +69,12 @@ static async Task RunPeriodicAsync(string name, Func<Task<ProcessingResult>> act
                     // Active cycle - reset idle counter and log summary
                     consecutiveIdleCycles = 0;
                     Logger.Stats.IncrementActiveCycles();
-                    Logger.Info($"[{name}] Processed: {result.Created} created, {result.Failed} failed, {result.Released} released");
+                    var parts = new List<string>();
+                    if (result.Created > 0) parts.Add($"{result.Created} created");
+                    if (result.Released > 0) parts.Add($"{result.Released} released");
+                    if (result.Skipped > 0) parts.Add($"{result.Skipped} skipped");
+                    if (result.Failed > 0) parts.Add($"{result.Failed} failed");
+                    Logger.Info($"[{name}] {string.Join(", ", parts)}");
                 }
                 else
                 {

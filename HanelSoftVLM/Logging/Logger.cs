@@ -58,6 +58,7 @@ public static class Logger
 
     public static void Info(string message) => Log("INFO", message);
     public static void Ok(string message) => Log("OK", message);
+    public static void Skip(string message) => Log("SKIP", message);
     public static void Warn(string message) => Log("WARN", message);
     public static void Fail(string message) => Log("FAIL", message);
 

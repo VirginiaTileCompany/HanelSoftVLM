@@ -36,6 +36,7 @@ public static class ItemDefinitionBuilder
         return $$"""
         {
           "identifier" : "{{itemNumber}}",
+          "name" : null,
           "description" : null,
           "group" : null,
           "measure" : "Piece",

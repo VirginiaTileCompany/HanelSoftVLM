@@ -67,18 +67,22 @@ public class CommissionProcessor
                 if (!string.IsNullOrEmpty(item))
                 {
                     var isNewSync = ItemSyncCache.TryMarkSynced(item);
-                    if (await PutItemAsync(item, row.GetString("MANUFACTURER"), row.GetString("PRODUCTLINE")))
+                    var (success, additionalItems, errorReason) = await PutItemAsync(item, row.GetString("MANUFACTURER"), row.GetString("PRODUCTLINE"));
+                    if (success)
                     {
                         if (isNewSync)
                         {
                             itemsSynced++;
-                            Logger.Ok($"Synced item: {item}");
+                            var additionalInfo = additionalItems.Count > 0
+                                ? $" (+ {string.Join(", ", additionalItems)})"
+                                : "";
+                            Logger.Ok($"Synced item: {item}{additionalInfo}");
                         }
                     }
                     else
                     {
                         // Only log item sync failures once per item
-                        Logger.FailOnce($"item-{item}", $"Failed to sync item: {item}");
+                        Logger.FailOnce($"item-{item}", $"Item {item} - {errorReason}");
                     }
                 }
             }
@@ -106,7 +110,7 @@ public class CommissionProcessor
                     // Check if release failed because order is already released
                     if (releaseBody.Contains("NOT_ALLOWED") || releaseBody.Contains("Release not successful"))
                     {
-                        Logger.Info($"Order {orderNumber} - Already released, marking as processed");
+                        Logger.Skip($"Order {orderNumber} - Already released");
                         RecordProcessedOrders(group, type);
                         FailureTracker.ClearFailure(orderNumber);
                     }
@@ -118,16 +122,19 @@ public class CommissionProcessor
             }
             else
             {
-                failed++;
                 // If order already exists in HanelSoft, record in VLMORDERS to prevent retries
-                if (createBody.Contains("already assigned"))
+                var alreadyExists = createBody.Contains("already assigned") ||
+                                    createBody.Contains("can not remove existing position");
+                if (alreadyExists)
                 {
+                    skipped++;
                     RecordProcessedOrders(group, type);
-                    Logger.Info($"Order {orderNumber} - Marked as processed (already exists in HanelSoft)");
+                    Logger.Skip($"Order {orderNumber} - Already in HanelSoft");
                     FailureTracker.ClearFailure(orderNumber);
                 }
                 else
                 {
+                    failed++;
                     // Track failure and check if we should abandon this order
                     var (_, isAbandoned) = FailureTracker.RecordFailure(orderNumber, createBody);
                     if (isAbandoned)
@@ -209,10 +216,18 @@ public class CommissionProcessor
             var body = await response.Content.ReadAsStringAsync();
             if (!response.IsSuccessStatusCode)
             {
-                var errorMessage = $"{response.StatusCode} - {body}";
-                var (shouldLog, _) = FailureTracker.RecordFailure(orderNumber, errorMessage);
-                if (shouldLog)
-                    Logger.Fail($"Order {orderNumber}: {errorMessage}");
+                // Don't log expected conditions as failures - they're handled gracefully by caller
+                var isExpectedCondition = body.Contains("NOT_ALLOWED") ||
+                                          body.Contains("Release not successful") ||
+                                          body.Contains("already assigned") ||
+                                          body.Contains("can not remove existing position");
+                if (!isExpectedCondition)
+                {
+                    var errorMessage = $"{response.StatusCode} - {body}";
+                    var (shouldLog, _) = FailureTracker.RecordFailure(orderNumber, errorMessage);
+                    if (shouldLog)
+                        Logger.Fail($"Order {orderNumber}: {errorMessage}");
+                }
                 return (false, body);
             }
             return (true, body);
@@ -226,12 +241,22 @@ public class CommissionProcessor
         }
     }
 
-    private async Task<bool> PutItemAsync(string item, string? manufacturer, string? productLine)
+    private async Task<(bool Success, List<string> AdditionalItems, string ErrorReason)> PutItemAsync(string item, string? manufacturer, string? productLine)
     {
         var additionalItems = GetAdditionalItemNumbers(item);
-        var (success, _) = await PutItemRequestAsync($"{_config.ApiBaseUrl}{_config.Endpoints.ItemDefinitionSave}",
+        var (success, body) = await PutItemRequestAsync($"{_config.ApiBaseUrl}{_config.Endpoints.ItemDefinitionSave}",
             ItemDefinitionBuilder.Build(item, manufacturer, productLine, additionalItems), item);
-        return success;
+
+        var errorReason = "";
+        if (!success && !string.IsNullOrEmpty(body))
+        {
+            // Extract short, user-friendly error reason from response
+            if (body.Contains("store strategy")) errorReason = "Store strategy in use";
+            else if (body.Contains("IMPORT_ERROR")) errorReason = "Import error";
+            else errorReason = "Sync failed";
+        }
+
+        return (success, additionalItems, errorReason);
     }
 
     // Separate PUT method for item syncs that doesn't use order failure tracking
@@ -239,6 +264,7 @@ public class CommissionProcessor
     {
         try
         {
+            Logger.Debug($"Item sync {itemNumber} JSON: {json}");
             var content = new StringContent(json, Encoding.UTF8, "application/json");
             var response = await _client.PutAsync(url, content);
             var body = await response.Content.ReadAsStringAsync();
@@ -247,12 +273,13 @@ public class CommissionProcessor
                 Logger.Debug($"Item sync {itemNumber} failed: {response.StatusCode} - {body}");
                 return (false, body);
             }
+            Logger.Debug($"Item sync {itemNumber} response: {body}");
             return (true, body);
         }
         catch (Exception ex)
         {
             Logger.Debug($"Item sync {itemNumber} failed: {ex.Message}");
-            return (false, "");
+            return (false, ex.Message);
         }
     }
 
@@ -267,10 +294,15 @@ public class CommissionProcessor
         };
 
         var dancik = new DancikObjects(query, parameters);
-        return dancik.ReturnData.AsEnumerable()
+        var results = dancik.ReturnData.AsEnumerable()
             .Select(r => r.GetString("CHILDITEM"))
             .Where(s => !string.IsNullOrEmpty(s))
             .ToList();
+
+        if (results.Count > 0)
+            Logger.Debug($"Item {parentItem}: Found {results.Count} additional items: {string.Join(", ", results)}");
+
+        return results;
     }
 
     public void Dispose() => _client.Dispose();
