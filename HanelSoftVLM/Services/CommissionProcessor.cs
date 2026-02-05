@@ -92,7 +92,7 @@ public class CommissionProcessor
             {
                 created++;
                 FailureTracker.ClearFailure(orderNumber);  // Clear any previous failures
-                var (releaseSuccess, _) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionRelease}/{typeName}/{orderNumber}", "", orderNumber);
+                var (releaseSuccess, releaseBody) = await PutAsync($"{_config.ApiBaseUrl}{_config.Endpoints.CommissionRelease}/{typeName}/{orderNumber}", "", orderNumber);
                 if (releaseSuccess)
                 {
                     released++;
@@ -102,7 +102,19 @@ public class CommissionProcessor
                     Logger.Debug($"Order {orderNumber} - {group.Count()} lines recorded in VLMORDERS");
                 }
                 else
-                    Logger.Warn($"Order {orderNumber} - Created but Release Failed");
+                {
+                    // Check if release failed because order is already released
+                    if (releaseBody.Contains("NOT_ALLOWED") || releaseBody.Contains("Release not successful"))
+                    {
+                        Logger.Info($"Order {orderNumber} - Already released, marking as processed");
+                        RecordProcessedOrders(group, type);
+                        FailureTracker.ClearFailure(orderNumber);
+                    }
+                    else
+                    {
+                        Logger.Warn($"Order {orderNumber} - Created but Release Failed");
+                    }
+                }
             }
             else
             {
