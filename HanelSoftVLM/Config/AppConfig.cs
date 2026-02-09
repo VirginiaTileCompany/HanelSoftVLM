@@ -9,6 +9,7 @@ public class AppConfig
     public int IssueIntervalSeconds { get; set; } = 30;
     public int LogRetentionDays { get; set; } = 14;
     public bool DebugEnabled { get; set; } = false;
+    public string AliasFilePath { get; set; } = "";
     public string ApiBaseUrl { get; set; } = "";
     public EndpointsConfig Endpoints { get; set; } = new();
 

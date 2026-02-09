@@ -48,6 +48,7 @@ public class CommissionProcessor
         var typeName = type == CommissionType.Issue ? "issueCommission" : "receiptCommission";
 
         int created = 0, failed = 0, released = 0, itemsSynced = 0, skipped = 0;
+        var aliasBatch = new List<(string Parent, List<string> Children)>();
 
         foreach (var group in groups)
         {
@@ -70,6 +71,9 @@ public class CommissionProcessor
                     var (success, additionalItems, errorReason) = await PutItemAsync(item, row.GetString("MANUFACTURER"), row.GetString("PRODUCTLINE"));
                     if (success)
                     {
+                        if (additionalItems.Count > 0)
+                            aliasBatch.Add((item, additionalItems));
+
                         if (isNewSync)
                         {
                             itemsSynced++;
@@ -145,6 +149,8 @@ public class CommissionProcessor
                 }
             }
         }
+
+        AliasFileWriter.WriteAliases(aliasBatch);
 
         return new ProcessingResult(data.Rows.Count, created, failed, released, itemsSynced, skipped);
     }

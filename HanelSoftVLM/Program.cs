@@ -6,9 +6,12 @@ using HanelSoftVLM.Services;
 
 var config = AppConfig.Load();
 Logger.Initialize(config.LogRetentionDays, config.DebugEnabled);
+AliasFileWriter.Initialize(config.AliasFilePath);
 var processor = new CommissionProcessor(config);
 
 Logger.Info($"HanelSoftVLM service started");
+if (!string.IsNullOrEmpty(config.AliasFilePath))
+    Logger.Info($"  Alias CSV path: {config.AliasFilePath}");
 Logger.Info($"  Receipt (Putaway) interval: {config.ReceiptIntervalSeconds} seconds");
 Logger.Info($"  Issue (Pick) interval: {config.IssueIntervalSeconds} seconds");
 Logger.Info("Press Ctrl+C to stop");
