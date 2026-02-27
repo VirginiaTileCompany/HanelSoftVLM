@@ -11,11 +11,7 @@ public static class CommissionBuilder
     {
         var lineNumber = row["LINENUMBER"]?.ToString() ?? "0";
         var quantity = decimal.TryParse(row["QUANTITY"]?.ToString(), out var q) ? q : 1m;
-        var serialNumber = row["SERIALNUMBER"]?.ToString()?.Trim() ?? "";
         var location = row["BINLOCATION"]?.ToString()?.Trim() ?? "";
-
-        var quantAttr = string.IsNullOrEmpty(serialNumber) ? "" :
-            $$"""{ "attribute" : "Serial_Number", "value" : "{{serialNumber}}" }""";
 
         // Issue = outbound (picking from warehouse), Receipt = inbound (receiving stock)
         if (type == CommissionType.Issue)
@@ -31,7 +27,7 @@ public static class CommissionBuilder
               "requiredQuantity" : {{quantity}},
               "itemDefinition" : "{{itemNumber}}",
               "positionAttributes" : [ {{posAttr}} ],
-              "quantAttributes" : [ {{quantAttr}} ]
+              "quantAttributes" : [ ]
             }
             """;
         }
@@ -62,7 +58,7 @@ public static class CommissionBuilder
               "positionAttributes" : [ {{posAttr}} ],
               "bookingAttributes" : [ ],
               "disabledBookingAttributes" : [ ],
-              "quantAttributes" : [ {{quantAttr}} ]
+              "quantAttributes" : [ ]
             }
             """;
         }

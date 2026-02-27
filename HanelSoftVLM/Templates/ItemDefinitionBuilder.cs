@@ -53,10 +53,7 @@ public static class ItemDefinitionBuilder
           },
           "disposable" : false,
           "clearStockForIssue" : false,
-          "quantAttributeSettings" : [ {
-            "quantAttribute" : "Serial_Number",
-            "requiredOnIssue" : "OPTIONAL"
-          } ],
+          "quantAttributeSettings" : [ ],
           "extensions" : {{extensionsJson}},
           "locks" : [ ],
           "storageZones" : [ ],
